@@ -7,6 +7,7 @@ declare -a commands=(
 		"du -ah | grep pipeline"
 		"cat /etc/passwd | grep $USER | sort"
 		"cat /etc/passwd | grep $USER | cut -d, -f1"
+		"ps -al | grep $$"
 		)
 
 for command in "${commands[@]}";
