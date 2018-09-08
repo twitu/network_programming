@@ -26,8 +26,9 @@ int main(int argc, char* argv[]) {
 	printf("starting program in process %d\n", getpid());
 
 	// populate the global array
+	srand(0);
 	for (int i = 1; i <= LENGTH; i++) {
-		global_array[i] = i;
+		global_array[i] = random();
 	}
 
 	// create signal masks for SIGUSR1 and SIGUSR2
