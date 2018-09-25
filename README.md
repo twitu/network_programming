@@ -11,5 +11,8 @@ The aim of the assignment is to use signals to synchronize between child process
 ## Assignment 2  
 The aim of the assignment is to use pipes to redirect output between commands  
 
+## Assignment 3  
+The aim of the assignment is to use semaphores to avoid deadlocks  
+
 ## Note  
 Each assignment has its own README detailing its specifications  
