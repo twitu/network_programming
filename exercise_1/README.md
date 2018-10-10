@@ -1,4 +1,4 @@
-# Assignment 1  
+# Exercise 1  
 ## Objective  
 Using signals to synchronize execution of child processes  
 

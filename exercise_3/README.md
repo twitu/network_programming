@@ -1,4 +1,4 @@
-# Assignment 3  
+# Exercise 3  
 ## Objective  
 Solving the classic dining philosphers problem, by using semaphores to prevent deadlocks  
 
