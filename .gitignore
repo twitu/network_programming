@@ -1,4 +1,12 @@
+// compiled files
 out/
-*.pdf
-*.tar.gz
+*.out
+*.o
 
+// documents
+*.pdf
+
+// compressed files
+*.tar.gz
+*.tar
+*.zip

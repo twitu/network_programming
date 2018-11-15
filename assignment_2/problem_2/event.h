@@ -3,9 +3,10 @@
 
 #define HTTP_REQ_LIMIT 255
 
-#define READ_REQUEST 0
-#define PROCESS_REQUEST 1
-#define WRITE_RESULT 2
+#define ACCEPT_EVENT 0
+#define READ_EVENT 1
+#define PROCESS_EVENT 2
+#define WRITE_EVENT 3
 
 typedef struct event {
     int socket_fd;
@@ -20,8 +21,10 @@ typedef struct event {
 
 typedef event* Event;
 
-void create_event(int socket_fd);
-Event get_event(void);
-void push_back(void);
-bool check_event(int socket_fd);
-void delete_tail(void);
+Event create_event(int socket_fd);
+void add_event(Event to_add);
+void add_to_buffer(Event to_add);
+Event get_next_event(void);
+void delete(void);
+bool has_event(void);
+Event get_from_buffer(int socket_fd);
