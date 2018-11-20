@@ -1,71 +1,57 @@
+#include <stdlib.h>
+#include <stdio.h>
+
 #include "event.h"
 
+Event temp = NULL;
 Event head = NULL;
 Event tail = NULL;
-Event buffer_head = NULL;
-Event buffer_tail = NULL;
-Event temp = NULL;
 
-int event_count[4];
-
-Event create_event(int socket_fd) {
+void add_event(int sock_fd, int event_type) {
     temp = malloc(sizeof(event));
-    temp->socket_fd = socket_fd;
-    temp->state = ACCEPT_EVENT;
-    temp->bytes_read = 0;
-    temp->bytes_to_write = 0;
-    temp->bytes_written = 0;
-    temp->mapped_file = NULL;
-    temp->next = NULL;
-    return temp;
+    temp->sock_fd = sock_fd;
+    temp->event = event_type;
+    if (head == NULL) head = temp;
+    if (tail == NULL) tail = temp;
+    tail->next = temp;
+    tail = temp;
 }
 
-void add_event(Event to_add) {
-    if (to_add == NULL) return;
-    if (head == NULL) head = to_add;
-    if (tail == NULL) tail = to_add;
-    else tail->next = to_add; tail = to_add;
-}
-
-void add_to_buffer(Event to_add) {
-    if (buffer_head == NULL) buffer_head = to_add;
-    if (buffer_tail == NULL) buffer_tail = to_add;
-    else buffer_tail->next = to_add; buffer_tail = to_add;
-}
-
-Event get_next_event(void) {
-    temp = head;
-    head = head->next;
-    return temp;
-}
-
-void delete(void) {
+void delete_head_event(void) {
+    if (head == NULL) return;
     temp = head->next;
     free(head);
     head = temp;
+}
+
+Event get_next_event(void) {
+    return head;
+}
+
+void push_back_head(void) {
+    if (head == tail)  return;  // handles NULL and single event cases
+    temp = head;
+    head = head->next;
+    tail->next = temp;
+    tail = tail->next;
 }
 
 bool has_event(void) {
     return head != NULL;
 }
 
-Event get_from_buffer(int socket_fd) {
-    if (buffer_head == NULL) return NULL;
-    if (buffer_head->socket_fd == socket_fd) {
-        temp = head;
-        head = head->next;
-        return temp;
-    }
+void print_head_event(void) {
+    printf("socket: %d, event: %d\n", head->sock_fd, head->event);
+}
 
-    temp = buffer_head;
-    while (temp->next != NULL) {
-        if (temp->next->socket_fd == socket_fd) {
-            Event to_return = temp->next;
-            temp->next = temp->next->next;
-            return to_return;
-        }
+void print_tail_event(void) {
+    printf("socket: %d, event: %d\n", tail->sock_fd, tail->event);
+}
+
+void print_events(void) {
+    temp = head;
+    while (temp != NULL) {
+        printf("socket: %d, event: %d\n", temp->sock_fd, temp->event);
         temp = temp->next;
     }
-
-    return NULL;
 }
