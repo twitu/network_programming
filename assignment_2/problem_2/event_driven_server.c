@@ -21,6 +21,7 @@
 #define LISTEN_PORT 8000
 #define MAX_BUFFER_SIZE 2048
 #define MAX_CLIENTS 200
+#define RESPONSE_HEADER_LIMIT 200
 
 // global variables
 int epfd;
@@ -44,6 +45,7 @@ void* event_generator(void* args) {
     int bytes, conn;
     char request[HTTP_REQ_LIMIT];
     char resource[RESOURCE_LIMIT];
+    char response_header[RESPONSE_HEADER_LIMIT];
 
     // initialize data structures to store data
     create_data_store(MAX_CLIENTS);
@@ -58,7 +60,7 @@ void* event_generator(void* args) {
     int enable = 1;
     int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int));
-    fcntl(listen_fd, F_SETFL, 0);
+    fcntl(listen_fd, F_SETFL, fcntl(listen_fd, F_GETFL, 0) | O_NONBLOCK);
     bind(listen_fd, (struct sockaddr*) &listen_addr, sizeof(struct sockaddr));
     listen(listen_fd, 5);
 
@@ -129,10 +131,10 @@ void* event_generator(void* args) {
                             if (strstr(event_data->request, "\r\n\r\n")) {
                                 // request received
                                 event_data->state = PROCESS_STATE;
-                                sprintf(event_data->request, "GET /%s ", resource);
+                                sscanf(event_data->request, "GET /%s ", resource);
                                 if (strstr(resource, ".cgi") == NULL) {
                                     // call helper thread to load file  
-                                    sscanf(event_data->resource, "%s", resource);
+                                    strcpy(event_data->resource, resource);
 
                                     // map file to memory
                                     int file_fd = open(resource, O_RDONLY);
@@ -140,6 +142,11 @@ void* event_generator(void* args) {
                                     fstat(file_fd, &file_stat);
                                     event_data->mapped_file = (char*) mmap(NULL, file_stat.st_size, PROT_READ, MAP_PRIVATE, file_fd, 0);
                                     mlock(event_data->mapped_file, file_stat.st_size);
+                                    event_data->bytes_to_write = file_stat.st_size;
+
+                                    // send header to client
+                                    sprintf(response_header, "HTTP/1.1 200 OK\r\nCache-Control : no-cache, private\r\nContent-Length : %ld\r\nDate : Mon, 24 Nov 2014 10:21:21 GMT\r\n\r\n", file_stat.st_size);
+                                    send(conn, response_header, strlen(response_header), 0);
 
                                     // modify to write state and change socket events for OUT
                                     event_data->state = WRITE_STATE;
@@ -171,7 +178,7 @@ void* event_generator(void* args) {
                         conn = events[i].data.fd;
                         bytes = event_data->bytes_written;
 
-                        if ((bytes = sendto(conn, &event_data->mapped_file[bytes], event_data->bytes_to_write - bytes, 0, NULL, 0)) == -1) {
+                        if ((bytes = send(conn, &event_data->mapped_file[bytes], event_data->bytes_to_write - bytes, 0)) == -1) {
                             if (errno == EAGAIN | errno == EWOULDBLOCK);
                             else perror("send()");
                         } else {
@@ -190,6 +197,7 @@ void* event_generator(void* args) {
 }
 
 void* event_handler(void* args) {
+    sleep(10000);
 
     int bytes, conn;
     char request[HTTP_REQ_LIMIT];

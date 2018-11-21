@@ -1,2 +1,2 @@
 compile:
-	gcc pipeline.c -o pipeline
+	gcc pipeline.c -o pipeline.out

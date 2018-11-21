@@ -13,7 +13,7 @@ declare -a commands=(
 for command in "${commands[@]}";
 do
 	echo "running programme with command: $command"
-	./pipeline "$command"
+	./pipeline.out "$command"
 	sleep 0.3
 	echo "==========================================="
 done

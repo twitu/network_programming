@@ -1,3 +1,3 @@
 compile:
-	gcc signal.c -o signal
+	gcc signal.c -o signal.out
 

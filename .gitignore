@@ -10,3 +10,6 @@ out/
 *.tar.gz
 *.tar
 *.zip
+
+// editor settings
+.vscode/
