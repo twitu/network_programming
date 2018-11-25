@@ -23,7 +23,7 @@ int find_empty_slot(void) {
 
 int find_data_slot(int socket_fd) {
     for (int i = 0; i < max_clients; i++) {
-        if (data_store[i]->socket_fd == socket_fd) return i;
+        if (data_store[i] != NULL && data_store[i]->socket_fd == socket_fd) return i;
     }
     return -1;
 }

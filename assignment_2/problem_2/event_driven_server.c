@@ -15,7 +15,6 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-#include "event.h"
 #include "data.h"
 
 #define LISTEN_PORT 8000
@@ -25,18 +24,21 @@
 
 // global variables
 int epfd;
+Data cgi_data;
+sem_t mutex;
 
 // function stubs
 void* event_generator(void* args);
-void* event_handler(void* args);
+void* fast_cgi(void* args);
 
 int main() {
+    sem_init(&mutex, 0, 0);
     pthread_t thread1, thread2;
     int iret1 = pthread_create(&thread1, NULL, event_generator, NULL);
-    int iret2 = pthread_create(&thread2, NULL, event_handler, NULL);
+    int iret2 = pthread_create(&thread2, NULL, fast_cgi, NULL);
 
     pthread_join(thread1, NULL);
-    pthread_join(thread2, NULL); 
+    pthread_join(thread2, NULL);
     exit(0);
 }
 
@@ -78,7 +80,7 @@ void* event_generator(void* args) {
     int event_count, event_fd;
     Data event_data;
     while (1) {
-        event_count = epoll_wait(epfd, events, MAX_CLIENTS + 1, 10000);
+        event_count = epoll_wait(epfd, events, MAX_CLIENTS + 1, 1000);
         for (int i = 0; i < event_count; i++) {
             // check events iteratively for events
             #ifdef DEBUG
@@ -127,6 +129,12 @@ void* event_generator(void* args) {
                             if (errno == EAGAIN | errno == EWOULDBLOCK);
                             else perror("recv()");
                         } else {
+                            if (bytes == 0) {
+                                // situation indicates socket has been closed from client side
+                                close(conn);
+                                delete_event_data(conn);
+                                continue;
+                            }
                             event_data->bytes_read += bytes;
                             if (strstr(event_data->request, "\r\n\r\n")) {
                                 // request received
@@ -134,18 +142,27 @@ void* event_generator(void* args) {
                                 sscanf(event_data->request, "GET /%s ", resource);
                                 if (strstr(resource, ".cgi") == NULL) {
                                     // call helper thread to load file  
-                                    strcpy(event_data->resource, resource);
+                                    sprintf(event_data->resource, "%s", resource);
 
                                     // map file to memory
                                     int file_fd = open(resource, O_RDONLY);
+                                    if (file_fd == -1) {
+                                        // error accessing file
+                                        close(file_fd);
+                                        char* error_reponse = "HTTP/1.1 404 Not Found\r\n\r\n";
+                                        send(conn, error_reponse, strlen(error_reponse), 0);
+                                        close(conn);
+                                        delete_event_data(conn);
+                                    }
                                     struct stat file_stat;
                                     fstat(file_fd, &file_stat);
                                     event_data->mapped_file = (char*) mmap(NULL, file_stat.st_size, PROT_READ, MAP_PRIVATE, file_fd, 0);
                                     mlock(event_data->mapped_file, file_stat.st_size);
                                     event_data->bytes_to_write = file_stat.st_size;
+                                    close(file_fd);
 
                                     // send header to client
-                                    sprintf(response_header, "HTTP/1.1 200 OK\r\nCache-Control : no-cache, private\r\nContent-Length : %ld\r\nDate : Mon, 24 Nov 2014 10:21:21 GMT\r\n\r\n", file_stat.st_size);
+                                    sprintf(response_header, "HTTP/1.1 200 OK\r\nContent-Length : %ld\r\n\r\n", file_stat.st_size);
                                     send(conn, response_header, strlen(response_header), 0);
 
                                     // modify to write state and change socket events for OUT
@@ -158,7 +175,10 @@ void* event_generator(void* args) {
                                     printf("received complete request\n");
                                     #endif
                                 } else {
-                                    // TODO call fast cgi process
+                                    // call fast cgi process
+                                    sprintf(event_data->resource, "%s", resource);
+                                    cgi_data = event_data;
+                                    sem_post(&mutex);
                                 }
                             }
 
@@ -196,126 +216,40 @@ void* event_generator(void* args) {
     }
 }
 
-void* event_handler(void* args) {
-    sleep(10000);
-
-    int bytes, conn;
-    char request[HTTP_REQ_LIMIT];
-    char resource[RESOURCE_LIMIT];
-
-    // initialize data structures to store data
-    create_data_store(MAX_CLIENTS);
-
-    Event sock_event;
-    Data event_data;
+void* fast_cgi(void* args) {
     while (1) {
-        if (!has_event()) continue;
-        sock_event = get_next_event();
-        if (sock_event->event == ACCEPT_EVENT) {
-            #ifdef DEBUG
-                printf("accept event\n");
-            #endif
-            
-            // if there is no space in data store accept and close connections
-            // this is done to avoid indefinetly blocking on listen_fd
-            // this is a common issue with edge triggered systems
-            while (!has_space()) {
-                #ifdef DEBUG
-                printf("no space dropping connections\n");
-                #endif
-                conn = accept(sock_event->sock_fd, NULL, 0);
-                close(conn);
-            }
-
-            if (conn = accept(sock_event->sock_fd, NULL, 0) == -1) {
-                if (errno == EAGAIN | errno == EWOULDBLOCK);
-                else perror("accept()");
-            } else {
-                #ifdef DEBUG
-                printf("connected on socket %d\n", conn);
-                #endif
-                fcntl(conn, F_SETFL, fcntl(conn, F_GETFL, 0) | O_NONBLOCK);
-                new_data_slot(conn);
-                struct epoll_event new_event;
-                new_event.data.fd = conn;
-                new_event.events = EPOLLIN | EPOLLET;  // receive only read events to get complete http request
-                epoll_ctl(epfd, EPOLL_CTL_ADD, conn, &new_event);
-            }
-        } else if (sock_event->event == READ_EVENT) {
-            #ifdef DEBUG
-                printf("read event\n");
-            #endif
-
-            event_data = get_event_data(sock_event->sock_fd);
-            // ignore if data not in READ_STATE
-            if (event_data->state == READ_STATE) {    
-                conn = sock_event->sock_fd;
-                bytes = event_data->bytes_read;
-
-                if ((bytes = recv(conn, &event_data->request[bytes], HTTP_REQ_LIMIT - bytes, 0)) == -1) {
-                    // read nothing
-                    if (errno == EAGAIN | errno == EWOULDBLOCK);
-                    else perror("recv()");
-                } else {
-                    event_data->bytes_read += bytes;
-                    if (strstr(event_data->request, "\r\n\r\n")) {
-                        // request received
-                        event_data->state = PROCESS_STATE;
-                        sprintf(event_data->request, "GET /%s ", resource);
-                        if (strstr(resource, ".cgi") == NULL) {
-                            // call helper thread to load file  
-                            sscanf(event_data->resource, "%s", resource);
-
-                            // map file to memory
-                            int file_fd = open(resource, O_RDONLY);
-                            struct stat file_stat;
-                            fstat(file_fd, &file_stat);
-                            event_data->mapped_file = (char*) mmap(NULL, file_stat.st_size, PROT_READ, MAP_PRIVATE, file_fd, 0);
-                            mlock(event_data->mapped_file, file_stat.st_size);
-                            event_data->state = WRITE_STATE;
-                            struct epoll_event modify;
-                            modify.data.fd = conn;
-                            modify.events = EPOLLOUT | EPOLLET;
-                            epoll_ctl(epfd, EPOLL_CTL_MOD, conn, &modify);
-                            #ifdef DEBUG
-                            printf("received complete request\n");
-                            #endif
-                        } else {
-                            // TODO call fast cgi process
-                        }
-                    }
-
-                    #ifdef DEBUG
-                    printf("read %d bytes\n", bytes);
-                    #endif
-                }
-            }
-        } else if (sock_event->event == WRITE_EVENT) {
-            #ifdef DEBUG
-                printf("write event\n");
-            #endif
-
-            event_data = get_event_data(sock_event->sock_fd);
-            // ignore if data not in WRITE_STATE
-            if (event_data->state == WRITE_STATE) {    
-                conn = sock_event->sock_fd;
-                bytes = event_data->bytes_written;
-
-                if ((bytes = sendto(conn, &event_data->mapped_file[bytes], event_data->bytes_to_write - bytes, 0, NULL, 0)) == -1) {
-                    if (errno == EAGAIN | errno == EWOULDBLOCK);
-                    else perror("send()");
-                } else {
-                    event_data->bytes_written += bytes;
-                    if (event_data->bytes_to_write == event_data->bytes_written) {
-                        close(sock_event->sock_fd);
-                        munlock(event_data->mapped_file, event_data->bytes_to_write);
-                        delete_event_data(conn);
-                    }
-                }
-            }
+        sem_wait(&mutex);
+        #ifdef DEBUG
+        printf("process fast cgi\n");
+        #endif
+        
+        char query[4];
+        sscanf(cgi_data->resource, "factorial.cgi=%s", query);
+        int limit = atoi(query);
+        int a = 1;
+        int b = 1;
+        int c;
+        cgi_data->mapped_file = (char*) mmap(NULL, sizeof(int) * limit, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        int* head = (int*) cgi_data->mapped_file;
+        head[0] = 1;
+        head[1] = 1;
+        for (int i = 2; i < limit; i++) {
+            c = a + b;
+            head[i] = c;
+            a = b;
+            b = c;
         }
-
-        // always delete head event after processing
-        delete_head_event();
+        cgi_data->bytes_to_write = limit * sizeof(int);
+        // send header to client
+        char response_header[100];
+        sprintf(response_header, "HTTP/1.1 200 OK\r\nContent-Length : %d\r\n\r\n", cgi_data->bytes_to_write);
+        send(cgi_data->socket_fd, response_header, strlen(response_header), 0);
+        // modify to write state and change socket events for OUT
+        cgi_data->state = WRITE_STATE;
+        struct epoll_event modify;
+        modify.data.fd = cgi_data->socket_fd;
+        modify.events = EPOLLOUT | EPOLLET;
+        epoll_ctl(epfd, EPOLL_CTL_MOD, cgi_data->socket_fd, &modify);
+        
     }
 }
