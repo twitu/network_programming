@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -5,92 +6,131 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <time.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
+#include <netinet/ip_icmp.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
+// global variables
 fd_set result;
+int start, end;
+struct sockaddr_in check_address;
 
-void* raw_socket(void* args);
-void udp_port_checker(struct sockaddr_in check_address, int start, int end);
-void tcp_port_checker(struct sockaddr_in check_address, int start, int end);
+void* raw_socket_checker(void* args);
+void* udp_port_checker(void* args);
+void* tcp_port_checker(void* args);
 
 int main(int argc, char* argv[]) {
     if (argc != 3) perror("incorrect arguments\n");
 
     // start and end ports for scan
-    int start = atoi(argv[1]);
-    int end = atoi(argv[2]);
+    start = atoi(argv[1]);
+    end = atoi(argv[2]);
 
-    struct sockaddr_in check_address;
-    check_address.sin_family = AF_INET;
-    check_address.sin_addr.s_addr = inet_addr("50.63.196.34");
+    FILE* ip_file = fopen("ip_list.txt", "r");
+    if (ip_file == NULL) exit(EXIT_FAILURE);
+    char* ip_string;
+    size_t length = 0;
+    ssize_t read;
 
-    udp_port_checker(check_address, start, end);
-}
+    while ((read = getline(&ip_string, &length, ip_file)) != -1) {
 
-void udp_port_checker(struct sockaddr_in check_address, int start, int end) {
+        check_address.sin_family = AF_INET;
+        check_address.sin_addr.s_addr = inet_addr(ip_string);
 
-    // use an fd_set to maintain a list of ports to be checked
-    // used as a cheap substitute for an array
-    FD_ZERO(&result);
-    for (int i = start; i <= end; i++) {
-        FD_SET(i, &result);
+        pthread_t raw_socket_thread, udp_thread, tcp_thread;
+
+        // check tcp ports
+        int iret1 = pthread_create(&tcp_thread, NULL, tcp_port_checker, NULL);
+        pthread_join(tcp_thread, NULL);
+
+        // check udp ports
+        // use an fd_set to maintain a list of ports to be checked
+        // used as a cheap substitute for an array
+        FD_ZERO(&result);
+        int i;
+        for (i = start; i <= end; i++) {
+            FD_SET(i, &result);
+        }
+
+        int iret2 = pthread_create(&raw_socket_thread, NULL, raw_socket_checker, NULL);
+        int iret3 = pthread_create(&udp_thread, NULL, udp_port_checker, NULL);
+        pthread_join(udp_thread, NULL);
+        // after sending all udp packets
+        // wait for possible ICMP packets to arrive in the raw socket 
+        sleep(5);
+
+        // result set has been modified by raw socket
+        // set ports are open
+        for (i = start; i <= end; i++) {
+            if (FD_ISSET(i, &result)) {
+                printf("udp port %d is open\n", i);
+            }
+        }
     }
 
-    // liisten on raw socket in separate thread
-    pthread_t raw_socket_thread;
-    int thread1 = pthread_create(&raw_socket_thread, NULL, raw_socket, NULL);
+}
+
+void* udp_port_checker(void* args) {
 
     // write to ports iteratively
     // send port number as packet data because it is returned in ICMP error
-    for (int i = start; i <= end; i++) {
+    int i, send_port_val;
+    for (i = start; i <= end; i++) {
         int sock_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         check_address.sin_port = htons(i);
-        sendto(sock_fd, &i, sizeof(i), 0, (struct sockaddr*) &check_address, sizeof(struct sockaddr));
+        // send port number as data
+        send_port_val = htonl(i);
+        sendto(sock_fd, &send_port_val, sizeof(int), 0, (struct sockaddr*) &check_address, sizeof(struct sockaddr));
     }
-    
-    pthread_join(thread1, NULL);
-
-    // result set has been modified by raw socket
-    // set ports are open
-    for (int i = start; i <= end; i++) {
-        if (FD_ISSET(i, &result)) {
-            printf("udp port %d is open\n", i);
-        }
-    }
-    return;
 }
 
-void* raw_socket(void* args) {
-    int sock_fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+void* raw_socket_checker(void* args) {
+    // declare structures to interpret received data
+    int hlen1, hlen2, icmp_len, ret;
+    struct ip *ip, *ip_hdr;
+    struct icmp *icmp;
+    struct udphdr *udp;
 
-    // apply 10 second timeout
-    struct timeval tv;
-    tv.tv_usec = 10;
-    tv.tv_usec = 0;
-    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(struct timeval));
+    // initialize raw socket
+    int sock_fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     
-    int error_fd;
-    // TODO: exit thread after a certain time interval
+    int n, error_port;
+    char recvbuf[2000];
     while (1) {
-        if (recvfrom(sock_fd, &error_fd, sizeof(int), 0, NULL, 0) == -1) {
-            if (errno != EAGAIN || errno != EWOULDBLOCK) {
-                perror("recvfrom()");
-            } else {
-                // clear receive port from result set
-                FD_CLR(error_fd, &result);
+        n = recvfrom(sock_fd, &recvbuf, sizeof(recvbuf), 0, NULL, 0);
+        if (n > 0) {
+            ip = (struct ip*) recvbuf; // start of ip header
+            hlen1 = ip->ip_hl << 2; // length of ip header 
+
+            icmp = (struct icmp*) (recvbuf + hlen1); // start of icmp header
+            if ((icmp_len = n - hlen1) < 8) continue; // icmp header not arrived
+            
+            if (icmp->icmp_type == ICMP_UNREACH && icmp->icmp_code == ICMP_UNREACH_PORT) {
+                if (icmp_len < 8 + sizeof(struct ip)) continue; // not enough data to look at ip
+                
+                ip_hdr = (struct ip*) (recvbuf + hlen1 + 8);
+                hlen2 = ip_hdr->ip_hl << 2;
+                if (icmp_len < 8 + hlen2 + 4) continue; // not enough to see ports
+
+                udp = (struct udphdr*) (recvbuf + hlen1 + 8 + hlen2);
+                error_port = ntohs(udp->dest);
+                if (FD_ISSET(error_port, &result)) FD_CLR(error_port, &result);
             }
         }
     }
 }
 
-void tcp_port_checker(struct sockaddr_in check_address, int start, int end) {
+void* tcp_port_checker(void* args) {
 
     struct timeval tval;
     fd_set rset, wset;
 
-    for (int i = start; i <= end; i++) {
+    int i;
+    for (i = start; i <= end; i++) {
         int sock_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         fcntl(sock_fd, F_SETFL, fcntl(sock_fd, F_GETFL, 0) | O_NONBLOCK);
         check_address.sin_port = htons(i);
